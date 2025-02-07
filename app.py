@@ -5,8 +5,9 @@ import json
 import bcrypt
 import re
 import streamlit as st
-import google.generativeai as genai
-from google.generativeai.types import content_types
+from google import genai
+from google.genai import types
+from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -54,7 +55,10 @@ EXTENSION_TO_MIME = {
 # 環境変数の読み込み (.env に GOOGLE_API_KEY, MODELS 等を記載)
 load_dotenv()
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
-genai.configure(api_key=GOOGLE_API_KEY)
+st.session_state.client = genai.Client(api_key=GOOGLE_API_KEY)
+google_search_tool = Tool(
+    google_search = GoogleSearch()
+)
 
 # data/ フォルダがなければ作成
 os.makedirs('data/', exist_ok=True)
@@ -145,16 +149,31 @@ try:
 except Exception:
     past_chats = {}
 
+# モデル選択機能
+try:
+    api_models = st.session_state.client.models.list()
+    api_model_names = [m.name for m in api_models]
+except Exception as e:
+    st.error('モデル一覧の取得に失敗しました: ' + str(e))
+    api_model_names = []
+
+additional_models = os.environ.get('MODELS', '').split(',')
+combined_models = sorted(set(api_model_names + [m.strip() for m in additional_models if m.strip()]))
+
+default_index = 0
+selected_model = st.selectbox('モデル選択', combined_models, index=default_index)
+
 # -----------------------------
 # サイドバー
 # -----------------------------
 with st.sidebar:
     # グラウンディング切り替えボタン
+    grounding_flag = False
     if 'grounding_enabled' not in st.session_state:
         st.session_state.grounding_enabled = False
     if st.button('グラウンディング：' + ('有効' if st.session_state.grounding_enabled else '無効')):
         st.session_state.grounding_enabled = not st.session_state.grounding_enabled
-        st.rerun()
+        grounding_flag = True
 
     new_chat_id = f'{time.time()}'
     chat_ids = sorted(past_chats.keys(), key=float, reverse=True)
@@ -198,44 +217,31 @@ with st.sidebar:
     # ====================================
     # ファイルアップローダー
     # ====================================
-    if not st.session_state.grounding_enabled:
-        allowed_extensions = list(EXTENSION_TO_MIME.keys())
-        new_file = st.file_uploader(
-            label='添付',
-            type= allowed_extensions,
-            accept_multiple_files=False,
+
+    allowed_extensions = list(EXTENSION_TO_MIME.keys())
+    new_file = st.file_uploader(
+        label='添付',
+        type= allowed_extensions,
+        accept_multiple_files=False,
+    )
+    if new_file:
+        file_data = new_file.read()  # バイナリデータを読み取り
+        # ファイル名・拡張子から MIME タイプを推定
+        extension = Path(new_file.name).suffix.lower().lstrip('.')
+        mime_type = EXTENSION_TO_MIME.get(extension, 'application/octet-stream')
+        # Part.from_bytes でコンテンツオブジェクトを作成（1つ目がファイルデータ）
+        file_part = types.Part.from_bytes(
+            data=file_data,
+            mime_type=mime_type,
         )
-        if new_file:
-            file_data = new_file.read()  # バイナリデータを読み取り
-            # ファイル名・拡張子から MIME タイプを推定
-            extension = Path(new_file.name).suffix.lower().lstrip('.')
-            mime_type = EXTENSION_TO_MIME.get(extension, 'application/octet-stream')
-            # Part.from_bytes でコンテンツオブジェクトを作成（1つ目がファイルデータ）
-            file_part = content_types.to_part({
-                'mime_type': mime_type,
-                'data': file_data,
-            })
-            if st.button('トークン数確認'):
-                st.session_state.token = '添付ファイルのトークン：' + str(st.session_state.model.count_tokens([file_part]).total_tokens)
-        else:
-            st.session_state.token = ''
+        if st.button('トークン数確認'):
+            st.session_state.token = '添付ファイルのトークン：' + str(st.session_state.client.models.count_tokens(model=selected_model,contents=file_part,).total_tokens)
+    else:
+        st.session_state.token = ''
     
     st.markdown(st.session_state.token)
-
-
-# モデル選択機能
-try:
-    api_models = genai.list_models()
-    api_model_names = [m.name for m in api_models]
-except Exception as e:
-    st.error('モデル一覧の取得に失敗しました: ' + str(e))
-    api_model_names = []
-
-additional_models = os.environ.get('MODELS', '').split(',')
-combined_models = sorted(set(api_model_names + [m.strip() for m in additional_models if m.strip()]))
-
-default_index = 0
-selected_model = st.selectbox('モデル選択', combined_models, index=default_index)
+    if grounding_flag:
+        st.rerun()
 
 # チャット履歴の読み込み
 try:
@@ -246,10 +252,7 @@ except Exception:
     st.session_state.gemini_history = []
 
 # モデルとチャットセッションの初期化
-st.session_state.model = genai.GenerativeModel(selected_model)
-st.session_state.chat = st.session_state.model.start_chat(
-    history=st.session_state.gemini_history,
-)
+st.session_state.chat = st.session_state.client.chats.create(model=selected_model, history=st.session_state.gemini_history)
 
 # 過去メッセージの表示
 for i, message in enumerate(st.session_state.messages):
@@ -257,23 +260,24 @@ for i, message in enumerate(st.session_state.messages):
         st.markdown(message['content'])
     # 「削除」ボタン
     if selected_chat != 'New Chat':
-        if st.button(f'Delete', key=f'reset_{i}'):
-            if i == 0:
-                try:
-                    os.remove(f'{user_dir}{selected_chat}-st_messages')
-                    os.remove(f'{user_dir}{selected_chat}-gemini_messages')
-                except FileNotFoundError:
-                    pass
-                del past_chats[selected_chat]
-                joblib.dump(past_chats, f'{user_dir}past_chats_list')
-                st.session_state.selected_chat = 'New Chat'
-                st.session_state.selected_index = 0
+        if message['role'] == 'user':
+            if st.button(f'Delete', key=f'reset_{i}'):
+                if i == 0:
+                    try:
+                        os.remove(f'{user_dir}{selected_chat}-st_messages')
+                        os.remove(f'{user_dir}{selected_chat}-gemini_messages')
+                    except FileNotFoundError:
+                        pass
+                    del past_chats[selected_chat]
+                    joblib.dump(past_chats, f'{user_dir}past_chats_list')
+                    st.session_state.selected_chat = 'New Chat'
+                    st.session_state.selected_index = 0
+                    st.rerun()
+                st.session_state.messages = st.session_state.messages[:i]
+                st.session_state.gemini_history = st.session_state.gemini_history[:i]
+                joblib.dump(st.session_state.messages, f'{user_dir}{st.session_state.chat_id}-st_messages')
+                joblib.dump(st.session_state.gemini_history, f'{user_dir}{st.session_state.chat_id}-gemini_messages')
                 st.rerun()
-            st.session_state.messages = st.session_state.messages[:i]
-            st.session_state.gemini_history = st.session_state.gemini_history[:i]
-            joblib.dump(st.session_state.messages, f'{user_dir}{st.session_state.chat_id}-st_messages')
-            joblib.dump(st.session_state.gemini_history, f'{user_dir}{st.session_state.chat_id}-gemini_messages')
-            st.rerun()
 
 # ユーザー入力欄
 if prompt := st.chat_input('Your message here...'):
@@ -290,10 +294,8 @@ if prompt := st.chat_input('Your message here...'):
     with st.chat_message('user'):
         # もしアップロードされたファイルがあれば、会話に表示する
         file_list_markdown = ''
-        if not st.session_state.grounding_enabled:
-            if new_file:
-                file_list_markdown = '\n - ' + new_file.name
-                
+        if new_file:
+            file_list_markdown = '\n - ' + new_file.name
         st.markdown(prompt + file_list_markdown)
         
     st.session_state.messages.append({'role': 'user', 'content': prompt + file_list_markdown})
@@ -301,13 +303,19 @@ if prompt := st.chat_input('Your message here...'):
 
     # 2. モデルへ問い合わせ
     if st.session_state.grounding_enabled:
-        response = st.session_state.chat.send_message(prompt, stream=True, tools='google_search_retrieval')
+        configs = GenerateContentConfig(tools=[google_search_tool],response_modalities=["TEXT"],)
+        response = st.session_state.chat.send_message_stream(message=prompt,config=configs)
+        if new_file:
+            contents = [file_part, prompt]
+            response = st.session_state.chat.send_message_stream(message=contents,config=configs)
+        else:
+            response = st.session_state.chat.send_message_stream(message=prompt,config=configs)
     else:
         if new_file:
             contents = [file_part, prompt]
-            response = st.session_state.chat.send_message(content=contents, stream=True)
+            response = st.session_state.chat.send_message_stream(message=contents)
         else:
-            response = st.session_state.chat.send_message(prompt, stream=True)
+            response = st.session_state.chat.send_message_stream(message=prompt)
 
     # 3. 応答をストリーミングで受け取り、チャットに表示
     with st.chat_message(name='ai', avatar='✨'):
@@ -342,12 +350,12 @@ if prompt := st.chat_input('Your message here...'):
             if all_grounding_links:
                 formatted_metadata += all_grounding_links + '\n'
             if all_grounding_queries:
-                formatted_metadata += 'Query: ' + all_grounding_queries + '\n'
+                formatted_metadata += '\nクエリ：' + all_grounding_queries + '\n'
             full_response += formatted_metadata
             message_placeholder.write(full_response)
 
     st.session_state.messages.append({'role': 'ai', 'content': full_response, 'avatar': '✨'})
-    st.session_state.gemini_history = st.session_state.chat.history
+    st.session_state.gemini_history = st.session_state.chat._curated_history
 
     joblib.dump(st.session_state.messages, f'{user_dir}{st.session_state.chat_id}-st_messages')
     joblib.dump(st.session_state.gemini_history, f'{user_dir}{st.session_state.chat_id}-gemini_messages')
