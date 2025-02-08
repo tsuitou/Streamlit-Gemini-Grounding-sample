@@ -368,11 +368,11 @@ if prompt := st.chat_input('Your message here...'):
                 formatted_metadata += '\nクエリ：' + all_grounding_queries + '\n'
             full_response += formatted_metadata
             message_placeholder.write(full_response)
-            if st.session_state.chat._curated_history and st.session_state.chat._curated_history[-1].role == "model":
-                # parts が複数ある可能性を考慮して、ループで処理
-                for part in st.session_state.chat._curated_history[-1].parts:
-                    if hasattr(part, 'text'): # text 属性があるか確認
-                        part.text += formatted_metadata
+            #if st.session_state.chat._curated_history and st.session_state.chat._curated_history[-1].role == "model":
+            #    # parts が複数ある可能性を考慮して、ループで処理
+            #    for part in st.session_state.chat._curated_history[-1].parts:
+            #        if hasattr(part, 'text'): # text 属性があるか確認
+            #            part.text += formatted_metadata
 
     st.session_state.messages.append({'role': 'ai', 'content': full_response, 'avatar': '✨'})
     st.session_state.gemini_history = st.session_state.chat._curated_history
