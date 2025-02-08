@@ -108,6 +108,18 @@ def authenticate(username, password):
         return True
     return False
 
+def find_gemini_index(messages, target_user_messages):
+    user_count = 0
+    for idx, content in enumerate(messages):
+        if content.role == 'user':
+            user_count += 1
+            if user_count == target_user_messages:
+                # ユーザーメッセージに対応する応答の最後まで含める
+                while idx + 1 < len(messages) and messages[idx + 1].role == 'model':
+                    idx += 1
+                return idx + 1
+    return len(messages)
+
 # ユーザー認証
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -274,7 +286,10 @@ for i, message in enumerate(st.session_state.messages):
                     st.session_state.selected_index = 0
                     st.rerun()
                 st.session_state.messages = st.session_state.messages[:i]
-                st.session_state.gemini_history = st.session_state.gemini_history[:i]
+                target_user_messages = sum(1 for msg in st.session_state.messages[:i] if msg['role'] == 'user')
+                gemini_index = find_gemini_index(st.session_state.gemini_history, target_user_messages)
+                st.session_state.gemini_history = st.session_state.gemini_history[:gemini_index]
+                
                 joblib.dump(st.session_state.messages, f'{user_dir}{st.session_state.chat_id}-st_messages')
                 joblib.dump(st.session_state.gemini_history, f'{user_dir}{st.session_state.chat_id}-gemini_messages')
                 st.rerun()
@@ -353,6 +368,11 @@ if prompt := st.chat_input('Your message here...'):
                 formatted_metadata += '\nクエリ：' + all_grounding_queries + '\n'
             full_response += formatted_metadata
             message_placeholder.write(full_response)
+            if st.session_state.chat._curated_history and st.session_state.chat._curated_history[-1].role == "model":
+                # parts が複数ある可能性を考慮して、ループで処理
+                for part in st.session_state.chat._curated_history[-1].parts:
+                    if hasattr(part, 'text'): # text 属性があるか確認
+                        part.text += formatted_metadata
 
     st.session_state.messages.append({'role': 'ai', 'content': full_response, 'avatar': '✨'})
     st.session_state.gemini_history = st.session_state.chat._curated_history
